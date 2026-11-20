@@ -89,6 +89,34 @@ Pod 选择器，键值对形式，默认为空，支持 Pod 选择器，例如�
 
 命名空间选择器，键值对形式，默认为空，支持命名空间选择器，例如：`owner: johndoe`；
 
+### 前缀规则（rules）
+
+除了 host 级别的 `proxies`，还支持按路径段匹配的前缀规则，适用于同一仓库下不同
+路径走不同代理的场景：
+
+```yaml
+rules:
+  - source: docker.io
+    target: proxy-a.example
+  - source: docker.io/library
+    target: proxy-b.example/library
+```
+
+匹配采用**最长前缀优先（按路径段计数）**，与规则书写顺序无关；前缀只在段边界匹配。
+相同前缀（含仅大小写/斜杠不同、规范化后相同）目标不同属于冲突，改写环也会在加载
+阶段报错并指出规则所在行；改写只执行一次，规则目标自动获得改写豁免。完整的冲突
+裁决、改写链/环处理与热加载语义见 [docs/hot-reload.md](./docs/hot-reload.md)。
+
+### 热加载
+
+修改 ConfigMap 后规则自动热加载，加载过程为「读取 → 解析 → 校验 → 构建 → 原子
+替换」，任一步失败旧规则继续生效，并通过日志（含出错规则行号与原因）和 Prometheus
+指标暴露；指标中的 `registry_proxy_rules_version` 与
+`registry_proxy_rules_active_checksum_info` 可用于确认当前生效的规则版本。
+
+也可以把配置以文件形式挂载并设置环境变量 `REGISTRY_PROXY_CONFIG_FILE` 指向该文件，
+此时会监听文件所在目录，能可靠捕获 ConfigMap 卷的符号链接原子替换更新。
+
 ## 实现原理
 
 使用 Mutating Webhook 准入控制器实现。 当集群中 Pod 创建时，Mutating Webhook 的工作流程如下：

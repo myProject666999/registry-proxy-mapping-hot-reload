@@ -25,6 +25,7 @@ import (
 
 	"github.com/ketches/registry-proxy/internal/config"
 	"github.com/ketches/registry-proxy/internal/global"
+	"github.com/ketches/registry-proxy/internal/rules"
 	"github.com/ketches/registry-proxy/pkg/image"
 	"github.com/ketches/registry-proxy/pkg/util"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -32,12 +33,14 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-func init() {
-	Init()
-}
-
 // Run starts the registry-proxy admission webhook.
 func Run() {
+	// Initialization (ConfigMap informer, optional file watcher, TLS and
+	// webhook registration) happens explicitly here rather than in a package
+	// init function, so importing the package has no cluster or filesystem
+	// side effects and unit tests can exercise the handlers in isolation.
+	Init()
+
 	http.HandleFunc(global.WebhookServicePath, mutatePod)
 	log.Println("Start serving registry-proxy admission webhook ...")
 
@@ -64,7 +67,13 @@ func mutatePod(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	patchBytes, err := patchPod(pod)
+	// Take the rule snapshot exactly once for the whole admission request.
+	// Every container lookup below uses this same immutable snapshot, so a
+	// concurrent hot reload can never make a pod see old rules for one
+	// container and new rules for another.
+	snapshot := config.Engine().Snapshot()
+
+	patchBytes, err := patchPod(pod, snapshot)
 	if err != nil {
 		log.Println("Marshal patch failed.")
 		http.Error(w, fmt.Sprintf("could not marshal patch: %v", err), http.StatusInternalServerError)
@@ -97,13 +106,13 @@ func parseRequest(r *http.Request) (*admissionv1.AdmissionReview, *corev1.Pod, e
 }
 
 // patchPod generates the patch for the pod.
-func patchPod(pod *corev1.Pod) ([]byte, error) {
+func patchPod(pod *corev1.Pod, snapshot *rules.Snapshot) ([]byte, error) {
 	// If the pod is controlled by a controller, set podName as generateName.
 	podName := util.ValueIf(pod.Name != "", pod.Name, pod.GenerateName)
 
 	log.Printf("Pod %s/%s is included", pod.Namespace, podName)
 
-	replaceImage(pod)
+	replaceImage(pod, snapshot)
 
 	var patches = []map[string]any{
 		{
@@ -151,46 +160,41 @@ func encodeResponse(w http.ResponseWriter, response *admissionv1.AdmissionReview
 	}
 }
 
-// replaceImage replaces the image in the pod with the proxy image.
-func replaceImage(pod *corev1.Pod) {
+// replaceImage replaces the images in the pod using the request-scoped rule
+// snapshot.
+func replaceImage(pod *corev1.Pod, snapshot *rules.Snapshot) {
 	for i := range pod.Spec.InitContainers {
-		pod.Spec.InitContainers[i].Image = getProxyImage(pod.Spec.InitContainers[i].Image)
+		pod.Spec.InitContainers[i].Image = getProxyImage(pod.Spec.InitContainers[i].Image, snapshot)
 	}
 
 	for i := range pod.Spec.Containers {
-		pod.Spec.Containers[i].Image = getProxyImage(pod.Spec.Containers[i].Image)
+		pod.Spec.Containers[i].Image = getProxyImage(pod.Spec.Containers[i].Image, snapshot)
 	}
 
 	for i := range pod.Spec.EphemeralContainers {
-		pod.Spec.EphemeralContainers[i].EphemeralContainerCommon.Image = getProxyImage(pod.Spec.EphemeralContainers[i].EphemeralContainerCommon.Image)
+		pod.Spec.EphemeralContainers[i].EphemeralContainerCommon.Image = getProxyImage(pod.Spec.EphemeralContainers[i].EphemeralContainerCommon.Image, snapshot)
 	}
 }
 
-// getProxyImage gets the proxy image of the raw image.
-func getProxyImage(rawImage string) string {
-	var result = rawImage
+// getProxyImage rewrites the raw image against the immutable snapshot. The
+// image is first parsed into registry + name so an implicit docker.io host
+// (e.g. "nginx:latest") is normalized before rule matching; the engine then
+// applies at most one longest-prefix rewrite and preserves the tag/digest.
+func getProxyImage(rawImage string, snapshot *rules.Snapshot) string {
+	result := rawImage
 	registry, name, err := image.Parse(rawImage)
 	if err != nil {
 		log.Println("Parse image failed.")
 		return result
 	}
 
-	result = path.Join(getProxyRegistry(registry), name)
-	if result != rawImage {
-		log.Printf("Proxy image: %s -> %s", rawImage, result)
+	ref := path.Join(registry, name)
+	rewritten, ok := snapshot.Rewrite(ref)
+	if !ok {
+		return result
 	}
-	return result
-}
-
-// getProxyRegistry gets the proxy registry of the raw registry.
-func getProxyRegistry(rawRegistry string) string {
-	proxies := config.GetProxies()
-	if proxies == nil {
-		return rawRegistry
+	if rewritten != rawImage {
+		log.Printf("Proxy image: %s -> %s", rawImage, rewritten)
 	}
-	newRegistry := proxies[rawRegistry]
-	if newRegistry == "" {
-		return rawRegistry
-	}
-	return newRegistry
+	return rewritten
 }

@@ -49,13 +49,17 @@ var (
 //
 // 1. Watch the ConfigMap and trigger config reset.
 //
-// 2. Create or reset the TLS cert and key secret.
+// 2. Optionally watch a mounted config file for symlink-safe hot reload.
 //
-// 3. Create or reset the MutatingWebhookConfiguration to use the new cert and config.
+// 3. Create or reset the TLS cert and key secret.
+//
+// 4. Create or reset the MutatingWebhookConfiguration to use the new cert and config.
 func Init() {
 	fmt.Println("Welcome to use registry-proxy!")
 
 	runConfigMapInformer()
+
+	startFileWatcher(context.Background())
 
 	applyTLSCertSecret()
 

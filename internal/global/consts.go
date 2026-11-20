@@ -23,6 +23,11 @@ const (
 	ConfigMapName = "registry-proxy-config"
 	ConfigMapPath = "config.yaml"
 
+	// ConfigFileEnv is the environment variable that, when set to a mounted
+	// config file path, enables file-system hot reload via a directory
+	// watcher. ConfigMap informer reloads remain available independently.
+	ConfigFileEnv = "REGISTRY_PROXY_CONFIG_FILE"
+
 	WebhookName               = "registry-proxy-webhook"
 	WebhookTLSCertSecretName  = "registry-proxy-webhook-tls"
 	WebhookServiceTLSCertFile = "tls.crt"
